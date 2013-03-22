@@ -105,7 +105,6 @@ public class AmqpBridge extends BusModBase {
         
         eb.registerHandler(address + ".send", new Handler<Message<VoomMessage>>() {
             public void handle(final Message<VoomMessage> message) {
-                logger.info("Do'in work.");
                 handleSend(message);
             }
         });
@@ -119,11 +118,9 @@ public class AmqpBridge extends BusModBase {
     // }}}
 
     public void ensureReplyChannel(final String queueName, String contentType) throws IOException {
-        logger.info("C");
         if (replyChannels.containsKey(queueName)) {
             return;
         }
-        logger.info("D");
         Channel channel = getChannel();
         
         Consumer cons;

@@ -27,7 +27,6 @@ public class AmqpAdapterRegistry {
             e.printStackTrace();
             throw new NoSuchMethodException();
         }
-        System.out.print(String.format("Ahandler=%s", handler));
         try {
             return (AmqpConsumer) c.newInstance(channel, handler);
         } catch (InstantiationException | IllegalAccessException

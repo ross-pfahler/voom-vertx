@@ -16,7 +16,6 @@ public abstract class AmqpConsumer extends DefaultConsumer {
 
     public AmqpConsumer(Channel channel, Handler<AmqpResponse> handler) {
         super(channel);
-        System.out.print(String.format("Bhandler=%s", handler));
         this.handler = handler;
     }
     
