@@ -1,22 +1,24 @@
 package org.vertx.java.busmods.amqp;
 
+import com.livefyre.voom.VoomHeaders;
+import com.livefyre.voom.VoomMessage;
+import com.livefyre.voom.amqp.AmqpAdapterRegistry;
+import com.livefyre.voom.amqp.AmqpConsumer;
+import com.livefyre.voom.amqp.mime.MimeMessageConsumer;
+import com.livefyre.voom.amqp.mime.MimeMessageSender;
 import com.rabbitmq.client.AMQP;
 import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.Connection;
 import com.rabbitmq.client.ConnectionFactory;
 import com.rabbitmq.client.Consumer;
-import com.rabbitmq.client.Envelope;
 
 import org.vertx.java.busmods.BusModBase;
 import org.vertx.java.core.Handler;
-import org.vertx.java.core.eventbus.EventBus;
 import org.vertx.java.core.eventbus.Message;
-import org.vertx.java.core.logging.Logger;
 
 import org.vertx.java.core.json.JsonObject;
 
 import java.io.IOException;
-import java.io.UnsupportedEncodingException;
 import java.security.NoSuchAlgorithmException;
 import java.security.KeyManagementException;
 
@@ -27,7 +29,7 @@ import java.util.HashMap;
 import java.util.Queue;
 import java.util.LinkedList;
 
-import java.util.UUID;
+import javax.mail.MessagingException;
 
 /**
  * Prototype for AMQP bridge
@@ -43,25 +45,24 @@ import java.util.UUID;
 public class AmqpBridge extends BusModBase {
     private Connection conn;
     private Map<Long, Channel> consumerChannels = new HashMap<>();
+    private Map<String, Channel> replyChannels = new HashMap<>();
     private long consumerSeq;
     private Queue<Channel> availableChannels = new LinkedList<>();
 
-    private String callbackQueue;
-    private RPCCallbackHandler rpcCallbackHandler;
-    private ContentType defaultContentType;
+    private String defaultContentType;
 
     // {{{ start
     /** {@inheritDoc} */
     @Override
     public void start() {
         super.start();
-
+        
         final String address = getMandatoryStringConfig("address");
         String uri = getMandatoryStringConfig("uri");
 
         logger.trace("address: " + address);
 
-        defaultContentType = ContentType.fromString(getMandatoryStringConfig("defaultContentType"));
+        defaultContentType = getMandatoryStringConfig("defaultContentType");
 
         ConnectionFactory factory = new ConnectionFactory();
 
@@ -81,11 +82,13 @@ public class AmqpBridge extends BusModBase {
             throw new IllegalStateException("Failed to create connection", e);
         }
 
-        try {
-            rpcCallbackHandler = new RPCCallbackHandler(getChannel(), defaultContentType, eb);
-        } catch (IOException e) {
-            throw new IllegalStateException("Unable to create queue for callbacks", e);
-        }
+        registerContentTypes();
+        
+//        try {
+//            rpcCallbackHandler = new RPCCallbackHandler(getChannel(), defaultContentType, eb);
+//        } catch (IOException e) {
+//            throw new IllegalStateException("Unable to create queue for callbacks", e);
+//        }
 
         // register handlers
         eb.registerHandler(address + ".create-consumer", new Handler<Message<JsonObject>>() {
@@ -99,21 +102,69 @@ public class AmqpBridge extends BusModBase {
                 handleCloseConsumer(message);
             }
         });
-
-        eb.registerHandler(address + ".send", new Handler<Message<JsonObject>>() {
-            public void handle(final Message<JsonObject> message) {
+        
+        eb.registerHandler(address + ".send", new Handler<Message<VoomMessage>>() {
+            public void handle(final Message<VoomMessage> message) {
+                logger.info("Do'in work.");
                 handleSend(message);
             }
         });
 
-        eb.registerHandler(address + ".invoke_rpc", new Handler<Message<JsonObject>>() {
-            public void handle(final Message<JsonObject> message) {
-                handleInvokeRPC(message);
-            }
-        });
+//        eb.registerHandler(address + ".invoke_rpc", new Handler<Message<JsonObject>>() {
+//            public void handle(final Message<JsonObject> message) {
+//                handleInvokeRPC(message);
+//            }
+//        });
     }
     // }}}
 
+    public void ensureReplyChannel(final String queueName, String contentType) throws IOException {
+        logger.info("C");
+        if (replyChannels.containsKey(queueName)) {
+            return;
+        }
+        logger.info("D");
+        Channel channel = getChannel();
+        
+        Consumer cons;
+        try {
+            cons = AmqpAdapterRegistry.getConsumer(contentType, channel, 
+                    new Handler<AmqpConsumer.AmqpResponse>() {
+                        public void handle(AmqpConsumer.AmqpResponse msg) {
+                            VoomHeaders headers = msg.body.getHeaders();
+                            logger.info(String.format("Received response of type %s, replyTo=%s, correlationId=%s",
+                                    headers.contentType(), 
+                                    headers.replyTo(), 
+                                    headers.correlationId()));
+
+                            eb.send(queueName, msg.body);
+                            try {
+                                getChannel().basicAck(msg.envelope.getDeliveryTag(), false);
+                            } catch (IOException e) {
+                                // TODO Auto-generated catch block
+                                e.printStackTrace();
+                            }
+//                        long deliveryTag = envelope.getDeliveryTag();
+//                        eb.send(forwardAddress, body);
+//                        
+                        }
+            });
+        } catch (NoSuchMethodException e) {
+            e.printStackTrace();
+            throw new IOException();
+        }
+
+        logger.info(String.format("Registering reply queue, name=%s", queueName));
+        channel.queueDeclare(queueName, false, true, true, null);
+        channel.basicConsume(queueName, cons);
+        replyChannels.put(queueName, channel);
+    }
+    
+    public void registerContentTypes() {
+        AmqpAdapterRegistry.register("multipart/mixed", new MimeMessageSender());
+        AmqpAdapterRegistry.register("multipart/mixed", MimeMessageConsumer.class);
+    }
+    
     // {{{ stop
     /** {@inheritDoc} */
     @Override
@@ -141,130 +192,52 @@ public class AmqpBridge extends BusModBase {
     // }}}
 
     // {{{ send
-    private void send(final AMQP.BasicProperties _props, final JsonObject message)
-        throws IOException
+    private void send(final AMQP.BasicProperties _props, final VoomMessage message)
+        throws IOException, MessagingException
     {
-        AMQP.BasicProperties.Builder amqpPropsBuilder = new AMQP.BasicProperties.Builder();
-
-        if (_props != null) {
-            amqpPropsBuilder = _props.builder();
-        }
-
-        // correlationId and replyTo will already be set, if necessary
-
-        JsonObject ebProps = message.getObject("properties");
-        if (ebProps != null) {
-            amqpPropsBuilder.clusterId(ebProps.getString("clusterId"));
-            amqpPropsBuilder.contentType(ebProps.getString("contentType"));
-            amqpPropsBuilder.contentEncoding(ebProps.getString("contentEncoding"));
-
-            if (ebProps.getNumber("deliveryMode") != null) {
-                amqpPropsBuilder.deliveryMode(ebProps.getNumber("deliveryMode").intValue());
-            }
-
-            amqpPropsBuilder.expiration(ebProps.getString("expiration"));
-
-            if (ebProps.getObject("headers") != null) {
-                amqpPropsBuilder.headers(ebProps.getObject("headers").toMap());
-            }
-
-            amqpPropsBuilder.messageId(ebProps.getString("messageId"));
-
-            if (ebProps.getNumber("priority") != null) {
-                amqpPropsBuilder.priority(ebProps.getNumber("priority").intValue());
-            }
-
-            // amqpPropsBuilder.timestamp(ebProps.getString("timestamp")); // @todo
-            amqpPropsBuilder.type(ebProps.getString("type"));
-            amqpPropsBuilder.userId(ebProps.getString("userId"));
-        }
-        
         Channel channel = getChannel();
         availableChannels.add(channel);
-
-        ContentType contentType = defaultContentType;
-
-        try {
-            contentType = ContentType.fromString(amqpPropsBuilder.build().getContentType());
-        } catch (IllegalArgumentException e) {
-            logger.warn(
-                "Illegal content type; using default " + defaultContentType.getContentType()
-            );
-
-            amqpPropsBuilder.contentType(contentType.getContentType());
+        VoomHeaders headers = message.getHeaders();
+        String ctype = headers.contentType().getBaseType();
+        logger.info(String.format("Sending message of type %s, replyTo=%s, correlationId=%s",
+                ctype, headers.replyTo(), headers.correlationId()));
+        if (headers.replyTo() != null) {
+            ensureReplyChannel(headers.replyTo(), ctype);
         }
-
-        byte[] messageBodyBytes;
-
-        if (
-            ContentType.JSON_CONTENT_TYPES.contains(contentType) ||
-            (contentType == ContentType.TEXT_PLAIN)
-        ) {
-            String contentEncoding = amqpPropsBuilder.build().getContentEncoding();
-            if (contentEncoding == null) {
-                contentEncoding = "UTF-8";
-
-                amqpPropsBuilder.contentEncoding(contentEncoding);
-            }
-
-            try {
-                if (contentType == ContentType.TEXT_PLAIN) {
-                    messageBodyBytes = message.getString("body").getBytes(contentEncoding);
-                } else {
-                    messageBodyBytes = message.getObject("body").encode().getBytes(contentEncoding);
-                }
-            } catch (UnsupportedEncodingException e) {
-                throw new IllegalStateException("unsupported encoding " + contentEncoding, e);
-            }
-        }
-        else if (contentType == ContentType.APPLICATION_BSON) {
-            // this must be encoded to bytes by the sender, because Vert.x has
-            // no support for BSON over the wire
-
-            messageBodyBytes = message.getBinary("body");
-        }
-        else {
-            throw new IllegalStateException("don't know how to transform " + contentType.getContentType());
-        }
-
-        channel.basicPublish(
-            // exchange must default to non-null string
-            message.getString("exchange", ""),
-            message.getString("routingKey"),
-            amqpPropsBuilder.build(),
-            messageBodyBytes
-        );
+        
+        AmqpAdapterRegistry.getSender(ctype).send(channel, message);
     }
     // }}}
 
     // {{{ createConsumer
     private long createConsumer(final String exchangeName,
                                 final String routingKey,
-                                final String forwardAddress)
+                                final String forwardAddress,
+                                final String contentType)
         throws IOException
     {
         Channel channel = getChannel();
-
-        Consumer cons = new MessageTransformingConsumer(channel, defaultContentType) {
-            public void doHandle(final String consumerTag,
-                                 final Envelope envelope,
-                                 final AMQP.BasicProperties properties,
-                                 final JsonObject body)
-                throws IOException
-            {
-                long deliveryTag = envelope.getDeliveryTag();
-
-                eb.send(forwardAddress, body);
-
-                getChannel().basicAck(deliveryTag, false);
-            }
-        };
-
+        
+        Consumer cons;
+        try {
+            cons = AmqpAdapterRegistry.getConsumer(contentType, channel, 
+                    new Handler<AmqpConsumer.AmqpResponse>() {
+                        public void handle(AmqpConsumer.AmqpResponse msg) {
+                            eb.send(forwardAddress, msg.body);
+//                        long deliveryTag = envelope.getDeliveryTag();
+//                        eb.send(forwardAddress, body);
+//                        getChannel().basicAck(deliveryTag, false);
+                        }
+            });
+        } catch (NoSuchMethodException e) {
+            e.printStackTrace();
+            throw new IOException();
+        }
+        
         String queueName = channel.queueDeclare().getQueue();
-
         channel.queueBind(queueName, exchangeName, routingKey);
-        channel.basicConsume(queueName, cons);
-
+        channel.basicConsume(queueName, cons);        
+        
         long id = consumerSeq++;
         consumerChannels.put(id, channel);
 
@@ -284,18 +257,19 @@ public class AmqpBridge extends BusModBase {
 
     // {{{ handleCreateConsumer
     private void handleCreateConsumer(final Message<JsonObject> message) {
-        String exchange = message.body.getString("exchange");
+        String exchange = message.body.getString("exchange", "");
         String routingKey = message.body.getString("routingKey");
         String forwardAddress = message.body.getString("forward");
+        String contentType = message.body.getString("content-type", defaultContentType);
 
         JsonObject reply = new JsonObject();
 
         try {
-            reply.putNumber("id", createConsumer(exchange, routingKey, forwardAddress));
+            reply.putNumber("id", createConsumer(exchange, routingKey, forwardAddress, contentType));
 
-            sendOK(message, reply);
+            //sendOK(message, reply);
         } catch (IOException e) {
-            sendError(message, "unable to create consumer: " + e.getMessage(), e);
+            //sendError(message, "unable to create consumer: " + e.getMessage(), e);
         }
     }
     // }}}
@@ -309,73 +283,75 @@ public class AmqpBridge extends BusModBase {
     // }}}
 
     // {{{ handleSend
-    private void handleSend(final Message<JsonObject> message) {
+    private <T> void handleSend(final Message<VoomMessage> message) {
         try {
             send(null, message.body);
-
-            sendOK(message);
-        } catch (IOException e) {
-            sendError(message, "unable to send: " + e.getMessage(), e);
+            // TODO
+            // sendOK(message);
+        } catch (IOException | MessagingException e) {
+            e.printStackTrace();
+            // TODO
+            // sendError(message, "unable to send: " + e.getMessage(), e);
         }
     }
     // }}}
 
     // {{{ handleInvokeRPC
-    private void handleInvokeRPC(final Message<JsonObject> message) {
-        // if replyTo is non-null, then this is a multiple-response RPC invocation
-        String replyTo = message.body.getString("replyTo");
-
-        boolean isMultiResponse = (replyTo != null);
-
-        // the correlationId is what ties this all together.
-        String correlationId = UUID.randomUUID().toString();
-
-        AMQP.BasicProperties.Builder amqpPropsBuilder = new AMQP.BasicProperties.Builder()
-            .correlationId(correlationId)
-            .replyTo(rpcCallbackHandler.getQueueName());
-
-        if (isMultiResponse) {
-            // multiple-response invocation
-
-            JsonObject msgProps = message.body.getObject("properties");
-
-            String ebCorrelationId = null;
-            Integer ttl = null;
-
-            if (msgProps != null) {
-                ebCorrelationId = msgProps.getString("correlationId");
-                ttl = ((Integer) msgProps.getNumber("timeToLive", 0)).intValue();
-
-                if (ttl == 0) {
-                    ttl = null;
-                }
-
-                // do not pass these on to send(); that could confuse things
-                msgProps.removeField("correlationId");
-                msgProps.removeField("timeToLive");
-            }
-
-            rpcCallbackHandler.addMultiResponseCorrelation(
-                correlationId,
-                ebCorrelationId,
-                replyTo,
-                ttl
-            );
-        } else {
-            // standard call/response invocation; message.reply() will be called
-            rpcCallbackHandler.addCorrelation(correlationId, message);
-        }
-
-        try {
-            send(amqpPropsBuilder.build(), message.body);
-
-            // always invoke message.reply to avoid ambiguity
-            if (isMultiResponse) {
-                sendOK(message);
-            }
-        } catch (IOException e) {
-            sendError(message, "unable to publish: " + e.getMessage(), e);
-        }
-    }
+//    private void handleInvokeRPC(final Message<JsonObject> message) {
+//        // if replyTo is non-null, then this is a multiple-response RPC invocation
+//        String replyTo = message.body.getString("replyTo");
+//
+//        boolean isMultiResponse = (replyTo != null);
+//
+//        // the correlationId is what ties this all together.
+//        String correlationId = UUID.randomUUID().toString();
+//
+//        AMQP.BasicProperties.Builder amqpPropsBuilder = new AMQP.BasicProperties.Builder()
+//            .correlationId(correlationId)
+//            .replyTo(rpcCallbackHandler.getQueueName());
+//
+//        if (isMultiResponse) {
+//            // multiple-response invocation
+//
+//            JsonObject msgProps = message.body.getObject("properties");
+//
+//            String ebCorrelationId = null;
+//            Integer ttl = null;
+//
+//            if (msgProps != null) {
+//                ebCorrelationId = msgProps.getString("correlationId");
+//                ttl = ((Integer) msgProps.getNumber("timeToLive", 0)).intValue();
+//
+//                if (ttl == 0) {
+//                    ttl = null;
+//                }
+//
+//                // do not pass these on to send(); that could confuse things
+//                msgProps.removeField("correlationId");
+//                msgProps.removeField("timeToLive");
+//            }
+//
+//            rpcCallbackHandler.addMultiResponseCorrelation(
+//                correlationId,
+//                ebCorrelationId,
+//                replyTo,
+//                ttl
+//            );
+//        } else {
+//            // standard call/response invocation; message.reply() will be called
+//            rpcCallbackHandler.addCorrelation(correlationId, message);
+//        }
+//
+//        try {
+//            send(amqpPropsBuilder.build(), message.body);
+//
+//            // always invoke message.reply to avoid ambiguity
+//            if (isMultiResponse) {
+//                sendOK(message);
+//            }
+//        } catch (IOException e) {
+//            sendError(message, "unable to publish: " + e.getMessage(), e);
+//        }
+//    }
     // }}}
 }

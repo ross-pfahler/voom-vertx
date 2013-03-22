@@ -44,7 +44,7 @@ abstract class MessageTransformingConsumer extends DefaultConsumer {
     private ContentType defaultContentType;
 
     /**
-     * This may or may not be thread safe.  Here goes nothin'…
+     * This may or may not be thread safe.  Here goes nothin'???
      */
     private final DatatypeFactory datatypeFactory;
 
@@ -85,8 +85,8 @@ abstract class MessageTransformingConsumer extends DefaultConsumer {
             {
                 exchange: String,
                 routingKey: String,
-                properties: { … },
-                body: { … }
+                properties: { ??? },
+                body: { ??? }
             }
         */
         JsonObject msg = new JsonObject()

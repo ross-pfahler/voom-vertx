@@ -25,14 +25,22 @@
         <amqp.uri>amqp://localhost</amqp.uri>
     </properties>
 
-    <scm>
+    <!-- <scm>
         <connection>scm:git:git@github.com:blalor/vert.x-busmod-amqp.git</connection>
         <developerConnection>scm:git:git@github.com:blalor/vert.x-busmod-amqp.git</developerConnection>
         <url>https://github.com/blalor/vert.x-busmod-amqp</url>
-    </scm>
+    </scm> -->
 
     <dependencies>
         <!-- == compile == -->
+        <dependency>
+	        <groupId>javax.mail</groupId>
+	        <artifactId>mail</artifactId>
+	        <version>1.4.6</version>
+	        <type>jar</type>
+	        <scope>compile</scope>
+        </dependency>
+        
         <dependency>
             <groupId>com.rabbitmq</groupId>
             <artifactId>amqp-client</artifactId>
@@ -107,7 +115,18 @@
             <version>${vertx.version}</version>
             <scope>test</scope>
         </dependency>
+             <dependency>
+            <groupId>com.google.protobuf</groupId>
+            <artifactId>protobuf-java</artifactId>
+            <version>2.4.1</version>
+        </dependency>
+             <dependency>
+            <groupId>com.livefyre</groupId>
+            <artifactId>voom</artifactId>
+            <version>0.0.1-SNAPSHOT</version>
+        </dependency>
     </dependencies>
+    
 
     <build>
         <testResources>
@@ -167,30 +186,15 @@
                     </execution>
                 </executions>
             </plugin>
-
-            <plugin>
-                <groupId>com.github.github</groupId>
-                <artifactId>downloads-maven-plugin</artifactId>
-                <version>0.5</version>
-
-                <configuration>
-                    <description>${project.version} release of ${project.name}</description>
-                    <override>true</override>
-                    <includes>
-                        <include>${project.artifactId}-${project.version}-mod.tar.gz</include>
-                    </includes>
-                </configuration>
-
-                <executions>
-                    <execution>
-                        <phase>deploy</phase>
-                        <goals>
-                            <goal>upload</goal>
-                        </goals>
-                    </execution>
-                </executions>
-            </plugin>
         </plugins>
+                <extensions>
+            <extension>
+                <groupId>org.springframework.build.aws</groupId>
+                <artifactId>org.springframework.build.aws.maven</artifactId>
+                <version>3.0.0.RELEASE</version>
+            </extension>
+        </extensions>
+        
     </build>
 
     <profiles>
@@ -223,4 +227,44 @@
             </build>
         </profile>
     </profiles>
+    
+    
+    <repositories>
+        <repository>
+            <id>maven-s3-release-repo</id>
+            <name>S3 Release Repository</name>
+            <url>s3://livefyre-maven/release</url>
+            <releases>
+                <enabled>true</enabled>
+            </releases>
+            <snapshots>
+                <enabled>false</enabled>
+            </snapshots>
+        </repository>
+        <repository>
+            <id>maven-s3-snapshot-repo</id>
+            <name>S3 Snapshot Repository</name>
+            <url>s3://livefyre-maven/snapshot</url>
+            <releases>
+                <enabled>false</enabled>
+            </releases>
+            <snapshots>
+                <enabled>true</enabled>
+            </snapshots>
+        </repository>
+    </repositories>   
+
+    <distributionManagement>
+        <repository>
+            <id>maven-s3-release-repo</id>
+            <name>S3 Release Repository</name>
+            <url>s3://livefyre-maven/release</url>
+        </repository>
+        <snapshotRepository>
+            <id>maven-s3-snapshot-repo</id>
+            <name>S3 Snapshot Repository</name>
+            <url>s3://livefyre-maven/snapshot</url>
+        </snapshotRepository>
+    </distributionManagement>
+    
 </project>
