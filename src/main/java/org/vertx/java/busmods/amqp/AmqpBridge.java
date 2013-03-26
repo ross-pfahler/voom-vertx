@@ -1,11 +1,14 @@
 package org.vertx.java.busmods.amqp;
 
+import com.livefyre.voom.ProtobufLoader;
 import com.livefyre.voom.VoomHeaders;
 import com.livefyre.voom.VoomMessage;
-import com.livefyre.voom.amqp.AmqpAdapterRegistry;
-import com.livefyre.voom.amqp.AmqpConsumer;
-import com.livefyre.voom.amqp.mime.MimeMessageConsumer;
-import com.livefyre.voom.amqp.mime.MimeMessageSender;
+import com.livefyre.voom.amqp.AMQPMessageSender;
+import com.livefyre.voom.amqp.CodecRegistry;
+import com.livefyre.voom.amqp.AMQPMessageConsumer;
+import com.livefyre.voom.codec.MessageCodec;
+import com.livefyre.voom.codec.protobuf.MimeProtobufBinaryCodec;
+import com.livefyre.voom.codec.protobuf.MimeProtobufMessageCodec;
 import com.rabbitmq.client.AMQP;
 import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.Connection;
@@ -48,8 +51,9 @@ public class AmqpBridge extends BusModBase {
     private Map<String, Channel> replyChannels = new HashMap<>();
     private long consumerSeq;
     private Queue<Channel> availableChannels = new LinkedList<>();
-
     private String defaultContentType;
+    
+    private Map<String, MessageCodec<com.google.protobuf.Message>> codecs = new HashMap<String, MessageCodec<com.google.protobuf.Message>>();
 
     // {{{ start
     /** {@inheritDoc} */
@@ -122,34 +126,25 @@ public class AmqpBridge extends BusModBase {
             return;
         }
         Channel channel = getChannel();
-        
-        Consumer cons;
-        try {
-            cons = AmqpAdapterRegistry.getConsumer(contentType, channel, 
-                    new Handler<AmqpConsumer.AmqpResponse>() {
-                        public void handle(AmqpConsumer.AmqpResponse msg) {
-                            VoomHeaders headers = msg.body.getHeaders();
-                            logger.info(String.format("Received response of type %s, replyTo=%s, correlationId=%s",
-                                    headers.contentType(), 
-                                    headers.replyTo(), 
-                                    headers.correlationId()));
-
-                            eb.send(queueName, msg.body);
-                            try {
-                                getChannel().basicAck(msg.envelope.getDeliveryTag(), false);
-                            } catch (IOException e) {
-                                // TODO Auto-generated catch block
-                                e.printStackTrace();
-                            }
-//                        long deliveryTag = envelope.getDeliveryTag();
-//                        eb.send(forwardAddress, body);
-//                        
-                        }
+        AMQPMessageConsumer<com.google.protobuf.Message> cons = new AMQPMessageConsumer<com.google.protobuf.Message>(channel, codecs.get("multipart/mixed"));
+        cons.handler(new Handler<AMQPMessageConsumer<com.google.protobuf.Message>.AmqpResponse> () {
+                public void handle(AMQPMessageConsumer<com.google.protobuf.Message>.AmqpResponse msg) {
+                    VoomHeaders headers = msg.body.getHeaders();
+                    logger.info(String.format("Received response of type %s, replyTo=%s, correlationId=%s",
+                            headers.contentType(), 
+                            headers.replyTo(), 
+                            headers.correlationId()));
+                    
+                    
+                    eb.send(queueName, msg.body);
+                    try {
+                        getChannel().basicAck(msg.envelope.getDeliveryTag(), false);
+                    } catch (IOException e) {
+                        // TODO Auto-generated catch block
+                        e.printStackTrace();
+                    }
+                }
             });
-        } catch (NoSuchMethodException e) {
-            e.printStackTrace();
-            throw new IOException();
-        }
 
         logger.info(String.format("Registering reply queue, name=%s", queueName));
         channel.queueDeclare(queueName, false, true, true, null);
@@ -158,8 +153,9 @@ public class AmqpBridge extends BusModBase {
     }
     
     public void registerContentTypes() {
-        AmqpAdapterRegistry.register("multipart/mixed", new MimeMessageSender());
-        AmqpAdapterRegistry.register("multipart/mixed", MimeMessageConsumer.class);
+        ProtobufLoader loader = new ProtobufLoader("com.livefyre.");
+        codecs.put("multipart/mixed", new MimeProtobufMessageCodec(
+                new MimeProtobufBinaryCodec(loader)));
     }
     
     // {{{ stop
@@ -189,7 +185,7 @@ public class AmqpBridge extends BusModBase {
     // }}}
 
     // {{{ send
-    private void send(final AMQP.BasicProperties _props, final VoomMessage message)
+    private void send(final AMQP.BasicProperties _props, final VoomMessage<com.google.protobuf.Message> message)
         throws IOException, MessagingException
     {
         Channel channel = getChannel();
@@ -201,8 +197,9 @@ public class AmqpBridge extends BusModBase {
         if (headers.replyTo() != null) {
             ensureReplyChannel(headers.replyTo(), ctype);
         }
-        
-        AmqpAdapterRegistry.getSender(ctype).send(channel, message);
+
+        (new AMQPMessageSender<com.google.protobuf.Message>(
+                codecs.get("multipart/mixed"))).send(channel, message);
     }
     // }}}
 
@@ -217,9 +214,9 @@ public class AmqpBridge extends BusModBase {
         
         Consumer cons;
         try {
-            cons = AmqpAdapterRegistry.getConsumer(contentType, channel, 
-                    new Handler<AmqpConsumer.AmqpResponse>() {
-                        public void handle(AmqpConsumer.AmqpResponse msg) {
+            cons = CodecRegistry.getConsumer(contentType, channel, 
+                    new Handler<AMQPMessageConsumer.AmqpResponse>() {
+                        public void handle(AMQPMessageConsumer.AmqpResponse msg) {
                             eb.send(forwardAddress, msg.body);
 //                        long deliveryTag = envelope.getDeliveryTag();
 //                        eb.send(forwardAddress, body);
@@ -282,7 +279,7 @@ public class AmqpBridge extends BusModBase {
     // {{{ handleSend
     private <T> void handleSend(final Message<VoomMessage> message) {
         try {
-            send(null, message.body);
+            send(null, (VoomMessage<com.google.protobuf.Message>)message.body);
             // TODO
             // sendOK(message);
         } catch (IOException | MessagingException e) {
