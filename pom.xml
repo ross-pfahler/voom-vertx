@@ -227,44 +227,4 @@
             </build>
         </profile>
     </profiles>
-    
-    
-    <repositories>
-        <repository>
-            <id>maven-s3-release-repo</id>
-            <name>S3 Release Repository</name>
-            <url>s3://livefyre-maven/release</url>
-            <releases>
-                <enabled>true</enabled>
-            </releases>
-            <snapshots>
-                <enabled>false</enabled>
-            </snapshots>
-        </repository>
-        <repository>
-            <id>maven-s3-snapshot-repo</id>
-            <name>S3 Snapshot Repository</name>
-            <url>s3://livefyre-maven/snapshot</url>
-            <releases>
-                <enabled>false</enabled>
-            </releases>
-            <snapshots>
-                <enabled>true</enabled>
-            </snapshots>
-        </repository>
-    </repositories>   
-
-    <distributionManagement>
-        <repository>
-            <id>maven-s3-release-repo</id>
-            <name>S3 Release Repository</name>
-            <url>s3://livefyre-maven/release</url>
-        </repository>
-        <snapshotRepository>
-            <id>maven-s3-snapshot-repo</id>
-            <name>S3 Snapshot Repository</name>
-            <url>s3://livefyre-maven/snapshot</url>
-        </snapshotRepository>
-    </distributionManagement>
-    
 </project>
