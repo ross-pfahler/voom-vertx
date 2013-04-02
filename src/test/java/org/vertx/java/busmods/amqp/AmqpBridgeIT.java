@@ -1,6 +1,6 @@
 package org.vertx.java.busmods.amqp;
 
-import org.vertx.java.framework.TestBase;
+import org.vertx.java.testframework.TestBase;
 
 public class AmqpBridgeIT extends TestBase implements AmqpBridgeTests {
     // {{{ setUp

@@ -1,7 +1,7 @@
 package org.vertx.java.busmods.amqp;
 
-import org.vertx.java.framework.TestBase;
-import org.vertx.java.framework.TestUtils;
+import org.vertx.java.testframework.TestBase;
+import org.vertx.java.testframework.TestUtils;
 
 import org.vertx.java.core.json.JsonObject;
 

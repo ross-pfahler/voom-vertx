@@ -1,6 +1,6 @@
 package org.vertx.java.busmods.amqp;
 
-import org.vertx.java.framework.TestClientBase;
+import org.vertx.java.testframework.TestClientBase;
 
 import org.vertx.java.core.json.JsonObject;
 import de.undercouch.bson4jackson.BsonFactory;
