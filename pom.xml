@@ -123,8 +123,19 @@
              <dependency>
             <groupId>com.livefyre</groupId>
             <artifactId>voom</artifactId>
-            <version>0.0.1-SNAPSHOT</version>
+            <version>0.0.2-SNAPSHOT</version>
         </dependency>
+		<dependency>
+		    <groupId>ch.qos.logback</groupId>
+		    <artifactId>logback-core</artifactId>
+		    <version>1.0.10</version>
+		</dependency>
+       <dependency>
+          <groupId>ch.qos.logback</groupId>
+            <artifactId>logback-classic</artifactId>
+            <version>1.0.10</version>
+        </dependency>
+		
     </dependencies>
     
 

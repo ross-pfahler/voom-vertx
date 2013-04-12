@@ -16,7 +16,7 @@ import com.rabbitmq.client.Envelope;
 
 public class AMQPMessageConsumer<T> extends DefaultConsumer {
     protected Handler<AmqpResponse> handler;
-    private MessageCodec<T> codec;
+    protected MessageCodec<T> codec;
 
     public AMQPMessageConsumer(Channel channel, MessageCodec<T> codec, Handler<AmqpResponse> handler) {
         this(channel, codec);
@@ -26,6 +26,14 @@ public class AMQPMessageConsumer<T> extends DefaultConsumer {
     public AMQPMessageConsumer(Channel channel, MessageCodec<T> codec) {
         super(channel);
         this.codec = codec;
+    }
+    
+    public AMQPMessageConsumer(Channel channel, AMQPMessageConsumer<T> other) {
+    	this(channel, other.codec, other.handler);
+    }
+    
+    public AMQPMessageConsumer<T> clone(Channel channel, AMQPMessageConsumer<T> other) {
+    	return new AMQPMessageConsumer<T>(channel, other);
     }
 
     public void handler(Handler<AmqpResponse> handler) {

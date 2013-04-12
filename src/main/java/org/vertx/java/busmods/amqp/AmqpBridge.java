@@ -3,19 +3,15 @@ package org.vertx.java.busmods.amqp;
 import com.livefyre.voom.ProtobufLoader;
 import com.livefyre.voom.VoomHeaders;
 import com.livefyre.voom.VoomMessage;
-import com.livefyre.voom.amqp.AMQPMessageSender;
-import com.livefyre.voom.amqp.CodecRegistry;
-import com.livefyre.voom.amqp.AMQPMessageConsumer;
 import com.livefyre.voom.codec.MessageCodec;
 import com.livefyre.voom.codec.protobuf.MimeProtobufBinaryCodec;
 import com.livefyre.voom.codec.protobuf.MimeProtobufMessageCodec;
 import com.rabbitmq.client.AMQP;
-import com.rabbitmq.client.Channel;
-import com.rabbitmq.client.Connection;
 import com.rabbitmq.client.ConnectionFactory;
-import com.rabbitmq.client.Consumer;
+import com.rabbitmq.client.Envelope;
 
 import org.vertx.java.busmods.BusModBase;
+import org.vertx.java.busmods.amqp.AmqpConnectionManager.AmqpConnectionReset;
 import org.vertx.java.core.Handler;
 import org.vertx.java.core.eventbus.Message;
 
@@ -27,10 +23,11 @@ import java.security.KeyManagementException;
 
 import java.net.URISyntaxException;
 
+import java.util.HashSet;
 import java.util.Map;
 import java.util.HashMap;
-import java.util.Queue;
-import java.util.LinkedList;
+import java.util.Map.Entry;
+import java.util.Set;
 
 import javax.mail.MessagingException;
 
@@ -46,14 +43,12 @@ import javax.mail.MessagingException;
  * @author <a href="http://github.com/blalor">Brian Lalor</a>
  */
 public class AmqpBridge extends BusModBase {
-    private Connection conn;
-    private Map<Long, Channel> consumerChannels = new HashMap<>();
-    private Map<String, Channel> replyChannels = new HashMap<>();
-    private long consumerSeq;
-    private Queue<Channel> availableChannels = new LinkedList<>();
+    private AmqpConnectionManager conn;
     private String defaultContentType;
+    private Set<String> replyChannels = new HashSet<String>();
     
     private Map<String, MessageCodec<com.google.protobuf.Message>> codecs = new HashMap<String, MessageCodec<com.google.protobuf.Message>>();
+	private String address;
 
     // {{{ start
     /** {@inheritDoc} */
@@ -61,7 +56,7 @@ public class AmqpBridge extends BusModBase {
     public void start() {
         super.start();
         
-        final String address = getMandatoryStringConfig("address");
+        address = getMandatoryStringConfig("address");
         String uri = getMandatoryStringConfig("uri");
 
         logger.trace("address: " + address);
@@ -81,7 +76,7 @@ public class AmqpBridge extends BusModBase {
         }
 
         try {
-            conn = factory.newConnection(); // IOException
+            conn = new AmqpConnectionManager(factory); // IOException
         } catch (IOException e) {
             throw new IllegalStateException("Failed to create connection", e);
         }
@@ -120,38 +115,41 @@ public class AmqpBridge extends BusModBase {
 //        });
     }
     // }}}
-
-    public void ensureReplyChannel(final String queueName, String contentType) throws IOException {
-        if (replyChannels.containsKey(queueName)) {
+    
+    public void ensureReplyChannel(final String queueName) throws IOException {
+        if (replyChannels.contains(queueName)) {
             return;
         }
-        Channel channel = getChannel();
-        AMQPMessageConsumer<com.google.protobuf.Message> cons = new AMQPMessageConsumer<com.google.protobuf.Message>(channel, codecs.get("multipart/mixed"));
-        cons.handler(new Handler<AMQPMessageConsumer<com.google.protobuf.Message>.AmqpResponse> () {
-                public void handle(AMQPMessageConsumer<com.google.protobuf.Message>.AmqpResponse msg) {
-                    VoomHeaders headers = msg.body.getHeaders();
-                    logger.info(String.format("Received response of type %s, replyTo=%s, correlationId=%s",
-                            headers.contentType(), 
-                            headers.replyTo(), 
-                            headers.correlationId()));
-                    
-                    
-                    eb.send(queueName, msg.body);
-                    try {
-                        getChannel().basicAck(msg.envelope.getDeliveryTag(), false);
-                    } catch (IOException e) {
-                        // TODO Auto-generated catch block
-                        e.printStackTrace();
-                    }
+
+        AmqpConsumerFactory factory = new AmqpConsumerFactory(codecs.get("multipart/mixed")) {
+        	public void handleDelivery(String consumerTag, Envelope envelope, AMQP.BasicProperties properties, byte[] body) throws IOException {
+        		VoomMessage<com.google.protobuf.Message> msg = decode(envelope, properties, body);
+                VoomHeaders headers = msg.getHeaders();
+                logger.info(String.format("Received response of type %s, replyTo=%s, correlationId=%s",
+                        headers.contentType(), 
+                        headers.replyTo(), 
+                        headers.correlationId()));
+                
+                eb.send(queueName, msg);
+                try {
+                    conn.basicAck(envelope.getDeliveryTag(), false);
+                } catch (AmqpConnectionReset resetError) {
+                	sendConnectionReset();
                 }
-            });
+                catch (IOException e) {
+                    // TODO Auto-generated catch block
+                    sendConnectionError();
+                }
+
+        	}
+        };
 
         logger.info(String.format("Registering reply queue, name=%s", queueName));
-        channel.queueDeclare(queueName, false, true, true, null);
-        channel.basicConsume(queueName, cons);
-        replyChannels.put(queueName, channel);
+        conn.queueDeclare(queueName, false, true, true, null);
+        conn.basicConsume(queueName, factory);
+        replyChannels.add(queueName);
     }
-    
+        
     public void registerContentTypes() {
         ProtobufLoader loader = new ProtobufLoader("com.livefyre.");
         codecs.put("multipart/mixed", new MimeProtobufMessageCodec(
@@ -162,24 +160,14 @@ public class AmqpBridge extends BusModBase {
     /** {@inheritDoc} */
     @Override
     public void stop() {
-        consumerChannels.clear();
+    	replyChannels.clear();
 
         if (conn != null) {
             try {
-                conn.close();
+                conn.disconnect();
             } catch (Exception e) {
                 logger.warn("Failed to close", e);
             }
-        }
-    }
-    // }}}
-
-    // {{{ getChannel
-    private Channel getChannel() throws IOException {
-        if (! availableChannels.isEmpty()) {
-            return availableChannels.remove();
-        } else {
-            return conn.createChannel(); // IOException
         }
     }
     // }}}
@@ -188,21 +176,62 @@ public class AmqpBridge extends BusModBase {
     private void send(final AMQP.BasicProperties _props, final VoomMessage<com.google.protobuf.Message> message)
         throws IOException, MessagingException
     {
-        Channel channel = getChannel();
-        availableChannels.add(channel);
-        VoomHeaders headers = message.getHeaders();
-        String ctype = headers.contentType().getBaseType();
+        String ctype = message.getHeaders().contentType().getBaseType();
         logger.info(String.format("Sending message of type %s, replyTo=%s, correlationId=%s",
-                ctype, headers.replyTo(), headers.correlationId()));
-        if (headers.replyTo() != null) {
-            ensureReplyChannel(headers.replyTo(), ctype);
+                ctype, message.getHeaders().replyTo(), message.getHeaders().correlationId()));
+
+        if (message.getHeaders().replyTo() != null) {
+        	ensureReplyChannel(message.getHeaders().replyTo());
         }
 
-        (new AMQPMessageSender<com.google.protobuf.Message>(
-                codecs.get("multipart/mixed"))).send(channel, message);
+        Map<String, String> headers = new HashMap<String, String>();
+        headers.putAll(message.getHeaders().toMap());
+
+        String exchange = headers.remove("exchange");
+        if (exchange == null) {
+            exchange = "";
+        }
+
+        String routingKey = headers.remove("routing_key");
+        AMQP.BasicProperties props = buildProperties(headers);
+        
+        conn.basicPublish(exchange, routingKey, props, 
+        		codecs.get("multipart/mixed").encodeMessage(message));
     }
     // }}}
+    
+    private AMQP.BasicProperties buildProperties(Map<String, String> headers) {
+        AMQP.BasicProperties props = new AMQP.BasicProperties();
+        AMQP.BasicProperties.Builder builder = props.builder();
 
+        builder.clusterId(headers.remove("cluster_id"));
+        builder.contentType(headers.remove("content-type"));
+        builder.contentEncoding(headers.remove("content-encoding"));
+        builder.replyTo(headers.remove("reply_to"));
+        builder.correlationId(headers.remove("correlation_id"));
+        
+        if (headers.containsKey("delivery_mode")) {
+            builder.deliveryMode(Integer.parseInt(headers.remove("delivery_mode")));
+        }
+
+        builder.expiration(headers.remove("expiration"));
+
+        builder.messageId(headers.remove("message_id"));
+
+        if (headers.containsKey("priority")) {
+            builder.priority(Integer.parseInt(headers.remove("priority")));
+        }
+
+            // amqpPropsBuilder.timestamp(ebProps.getString("timestamp")); // @todo
+        builder.type(headers.remove("type"));
+        builder.userId(headers.remove("user_id"));
+        
+        Map<String, Object> objectHeaders = new HashMap<String, Object>();
+        objectHeaders.putAll(headers);
+        builder.headers(objectHeaders);
+        return builder.build();
+    }    
+    
     // {{{ createConsumer
     private long createConsumer(final String exchangeName,
                                 final String routingKey,
@@ -210,44 +239,63 @@ public class AmqpBridge extends BusModBase {
                                 final String contentType)
         throws IOException
     {
-        Channel channel = getChannel();
-        
-        Consumer cons;
-        try {
-            cons = CodecRegistry.getConsumer(contentType, channel, 
-                    new Handler<AMQPMessageConsumer.AmqpResponse>() {
-                        public void handle(AMQPMessageConsumer.AmqpResponse msg) {
-                            eb.send(forwardAddress, msg.body);
-//                        long deliveryTag = envelope.getDeliveryTag();
-//                        eb.send(forwardAddress, body);
-//                        getChannel().basicAck(deliveryTag, false);
-                        }
-            });
-        } catch (NoSuchMethodException e) {
-            e.printStackTrace();
-            throw new IOException();
-        }
-        
-        String queueName = channel.queueDeclare().getQueue();
-        channel.queueBind(queueName, exchangeName, routingKey);
-        channel.basicConsume(queueName, cons);        
-        
-        long id = consumerSeq++;
-        consumerChannels.put(id, channel);
 
-        return id;
+    	AmqpConsumerFactory consumerFactory = new AmqpConsumerFactory(codecs.get("multipart/mixed")) {
+    		public void handleDelivery(String consumerTag, Envelope envelope, AMQP.BasicProperties properties, byte[] body) throws IOException {
+    			VoomMessage<com.google.protobuf.Message> msg = decode(envelope, properties, body);
+    			eb.send(forwardAddress, msg);
+    			conn.basicAck(envelope.getDeliveryTag(), false);
+    		}
+    	};
+    	
+    	return conn.basicConsume(conn.queueDeclare().getQueue(), exchangeName, routingKey, consumerFactory);
     }
     // }}}
 
+    public VoomHeaders getHeaders(Envelope envelope, AMQP.BasicProperties props) {
+        VoomHeaders headers = new VoomHeaders();
+        
+        headers.put("cluster_id", props.getClusterId());
+        headers.put("Content-Type", props.getContentType());
+        headers.put("Content-Encoding", props.getContentEncoding());
+        headers.put("reply_to", props.getReplyTo());
+        headers.put("correlation_id", props.getCorrelationId());
+        headers.putInt("delivery_mode", props.getDeliveryMode());
+        headers.put("expiration", props.getExpiration());
+        headers.put("message_id", props.getMessageId());
+        headers.putInt("priority", props.getPriority());
+        headers.put("type", props.getType());
+        headers.put("user_id", props.getUserId());
+        
+        for (Entry<String, Object> header: props.getHeaders().entrySet()) {
+            // TODO: How do we handle non-string values;
+            headers.put(header.getKey(), header.getValue().toString());
+        }
+        
+        headers.put("routing_key", envelope.getRoutingKey());
+        headers.put("exchange", envelope.getExchange());
+        
+        return headers;
+    }
+        
     // {{{ closeConsumer
     private void closeConsumer(final long id) {
-        Channel channel = consumerChannels.remove(id);
-
-        if (channel != null) {
-            availableChannels.add(channel);
-        }
+        conn.stopConsumer(id);
     }
     // }}}
+    
+    private void sendConnectionError() {
+    	System.out.print("ERROROROR");
+    	JsonObject errorMsg = new JsonObject();
+    	errorMsg.putString("type", "ConnectionError");
+    	eb.send(new StringBuilder(address).append(".error").toString(), errorMsg);
+	}
+
+	private void sendConnectionReset() {
+		JsonObject errorMsg = new JsonObject();
+    	errorMsg.putString("type", "ConnectionReset");
+    	eb.send(new StringBuilder(address).append(".error").toString(), errorMsg);
+	}
 
     // {{{ handleCreateConsumer
     private void handleCreateConsumer(final Message<JsonObject> message) {
@@ -260,19 +308,22 @@ public class AmqpBridge extends BusModBase {
 
         try {
             reply.putNumber("id", createConsumer(exchange, routingKey, forwardAddress, contentType));
-
-            //sendOK(message, reply);
-        } catch (IOException e) {
-            //sendError(message, "unable to create consumer: " + e.getMessage(), e);
+        } catch (AmqpConnectionReset resetError) {
+        	resetError.printStackTrace();
+        	replyChannels.clear();
+        	sendConnectionReset();
+        }
+        catch (IOException e) {
+        	e.printStackTrace();
+            sendConnectionError();
         }
     }
     // }}}
 
-    // {{{ handleCloseConsumer
+	// {{{ handleCloseConsumer
     private void handleCloseConsumer(final Message<JsonObject> message) {
         long id = (Long) message.body.getNumber("id");
-
-        closeConsumer(id);
+    	closeConsumer(id);
     }
     // }}}
 
@@ -280,72 +331,17 @@ public class AmqpBridge extends BusModBase {
     private <T> void handleSend(final Message<VoomMessage> message) {
         try {
             send(null, (VoomMessage<com.google.protobuf.Message>)message.body);
-            // TODO
-            // sendOK(message);
-        } catch (IOException | MessagingException e) {
-            e.printStackTrace();
-            // TODO
-            // sendError(message, "unable to send: " + e.getMessage(), e);
+        } catch (AmqpConnectionReset resetError) {
+        	resetError.printStackTrace();
+        	replyChannels.clear();
+        	sendConnectionReset();
         }
+        catch (IOException e) {
+        	e.printStackTrace();
+            sendConnectionError();
+        } catch (MessagingException e) {
+			e.printStackTrace();
+		}
     }
-    // }}}
-
-    // {{{ handleInvokeRPC
-//    private void handleInvokeRPC(final Message<JsonObject> message) {
-//        // if replyTo is non-null, then this is a multiple-response RPC invocation
-//        String replyTo = message.body.getString("replyTo");
-//
-//        boolean isMultiResponse = (replyTo != null);
-//
-//        // the correlationId is what ties this all together.
-//        String correlationId = UUID.randomUUID().toString();
-//
-//        AMQP.BasicProperties.Builder amqpPropsBuilder = new AMQP.BasicProperties.Builder()
-//            .correlationId(correlationId)
-//            .replyTo(rpcCallbackHandler.getQueueName());
-//
-//        if (isMultiResponse) {
-//            // multiple-response invocation
-//
-//            JsonObject msgProps = message.body.getObject("properties");
-//
-//            String ebCorrelationId = null;
-//            Integer ttl = null;
-//
-//            if (msgProps != null) {
-//                ebCorrelationId = msgProps.getString("correlationId");
-//                ttl = ((Integer) msgProps.getNumber("timeToLive", 0)).intValue();
-//
-//                if (ttl == 0) {
-//                    ttl = null;
-//                }
-//
-//                // do not pass these on to send(); that could confuse things
-//                msgProps.removeField("correlationId");
-//                msgProps.removeField("timeToLive");
-//            }
-//
-//            rpcCallbackHandler.addMultiResponseCorrelation(
-//                correlationId,
-//                ebCorrelationId,
-//                replyTo,
-//                ttl
-//            );
-//        } else {
-//            // standard call/response invocation; message.reply() will be called
-//            rpcCallbackHandler.addCorrelation(correlationId, message);
-//        }
-//
-//        try {
-//            send(amqpPropsBuilder.build(), message.body);
-//
-//            // always invoke message.reply to avoid ambiguity
-//            if (isMultiResponse) {
-//                sendOK(message);
-//            }
-//        } catch (IOException e) {
-//            sendError(message, "unable to publish: " + e.getMessage(), e);
-//        }
-//    }
     // }}}
 }
