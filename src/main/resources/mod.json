@@ -1,4 +1,4 @@
 {
-  "main": "org.vertx.java.busmods.amqp.AmqpBridge",
+  "main": "com.livefyre.voom.vertx.VoomBridge",
   "worker": true
 }

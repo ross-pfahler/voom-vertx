@@ -12,13 +12,18 @@
 
     <baseDirectory>${project.artifactId}#${project.version}</baseDirectory>
 
-    <dependencySets>
+    <!-- <dependencySets>
         <dependencySet>
             <outputDirectory>lib</outputDirectory>
         </dependencySet>
-    </dependencySets>
+    </dependencySets> -->
 
     <fileSets>
+        <fileSet>
+            <!-- empty outputDirectory puts mod.json at the root of the structure -->
+            <outputDirectory></outputDirectory>
+            <directory>target/classes</directory>
+        </fileSet>
         <fileSet>
             <!-- empty outputDirectory puts mod.json at the root of the structure -->
             <outputDirectory></outputDirectory>

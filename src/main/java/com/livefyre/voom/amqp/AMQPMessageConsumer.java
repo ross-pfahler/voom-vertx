@@ -3,41 +3,20 @@ package com.livefyre.voom.amqp;
 import java.io.IOException;
 import java.util.Map.Entry;
 
-import org.vertx.java.core.Handler;
-
 import com.livefyre.voom.VoomHeaders;
 import com.livefyre.voom.VoomMessage;
 import com.livefyre.voom.codec.MessageCodec;
 import com.rabbitmq.client.AMQP;
-import com.rabbitmq.client.AMQP.BasicProperties;
 import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.DefaultConsumer;
 import com.rabbitmq.client.Envelope;
 
 public class AMQPMessageConsumer<T> extends DefaultConsumer {
-    protected Handler<AmqpResponse> handler;
     protected MessageCodec<T> codec;
-
-    public AMQPMessageConsumer(Channel channel, MessageCodec<T> codec, Handler<AmqpResponse> handler) {
-        this(channel, codec);
-        this.handler = handler;
-    }
 
     public AMQPMessageConsumer(Channel channel, MessageCodec<T> codec) {
         super(channel);
         this.codec = codec;
-    }
-    
-    public AMQPMessageConsumer(Channel channel, AMQPMessageConsumer<T> other) {
-    	this(channel, other.codec, other.handler);
-    }
-    
-    public AMQPMessageConsumer<T> clone(Channel channel, AMQPMessageConsumer<T> other) {
-    	return new AMQPMessageConsumer<T>(channel, other);
-    }
-
-    public void handler(Handler<AmqpResponse> handler) {
-        this.handler = handler;
     }
     
     public void handleDelivery(final String consumerTag,
@@ -47,17 +26,17 @@ public class AMQPMessageConsumer<T> extends DefaultConsumer {
                     throws IOException
                     {
         
-        // TODO: We're only handling multipart/mixed because that's what
-        // we're getting from the other side, handle other content types?
-        
-        AmqpResponse resp = new AmqpResponse(consumerTag, 
-                envelope, 
-                properties,
-                codec.decodeMessage(body));
-        
-        resp.body.putHeaders(getHeaders(envelope, properties));
-        
-        handler.handle(resp);
+        VoomMessage<T> msg = codec.decodeMessage(body);
+        msg.putHeaders(getHeaders(envelope, properties));
+        handleDelivery(consumerTag, envelope, properties, msg);
+    }
+    
+    public void handleDelivery(final String consumerTag,
+            final Envelope envelope,
+            final AMQP.BasicProperties properties,
+            final VoomMessage<T> body)
+                    throws IOException
+                    {
     }
     
     public VoomHeaders getHeaders(Envelope envelope, AMQP.BasicProperties props) {
@@ -84,21 +63,5 @@ public class AMQPMessageConsumer<T> extends DefaultConsumer {
         headers.put("exchange", envelope.getExchange());
         
         return headers;
-    }
-        
-    public class AmqpResponse {
-        public String consumerTag;
-        public Envelope envelope;
-        public AMQP.BasicProperties properties;
-        public VoomMessage<T> body;
-        
-        public AmqpResponse(String consumerTag, Envelope envelope,
-                BasicProperties properties, VoomMessage<T> body) {
-            super();
-            this.consumerTag = consumerTag;
-            this.envelope = envelope;
-            this.properties = properties;
-            this.body = body;
-        }
     }
 }
