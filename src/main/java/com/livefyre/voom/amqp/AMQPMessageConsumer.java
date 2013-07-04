@@ -25,13 +25,12 @@ public class AMQPMessageConsumer<T> extends DefaultConsumer {
             final byte[] body)
                     throws IOException
                     {
-        
         VoomMessage<T> msg = codec.decodeMessage(body);
         msg.putHeaders(getHeaders(envelope, properties));
         handleDelivery(consumerTag, envelope, properties, msg);
     }
     
-    public void handleDelivery(final String consumerTag,
+    protected void handleDelivery(final String consumerTag,
             final Envelope envelope,
             final AMQP.BasicProperties properties,
             final VoomMessage<T> body)
@@ -53,10 +52,12 @@ public class AMQPMessageConsumer<T> extends DefaultConsumer {
         headers.putInt("priority", props.getPriority());
         headers.put("type", props.getType());
         headers.put("user_id", props.getUserId());
-        
+
         for (Entry<String, Object> header: props.getHeaders().entrySet()) {
             // TODO: How do we handle non-string values;
-            headers.put(header.getKey(), header.getValue().toString());
+            if (header.getValue() != null) {
+                headers.put(header.getKey(), header.getValue().toString());
+            }
         }
         
         headers.put("routing_key", envelope.getRoutingKey());

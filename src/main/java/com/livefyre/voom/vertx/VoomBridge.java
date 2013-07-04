@@ -7,8 +7,8 @@ import java.security.NoSuchAlgorithmException;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.Map;
-import java.util.Map.Entry;
 import java.util.Queue;
+import java.util.UUID;
 
 import javax.mail.MessagingException;
 
@@ -39,11 +39,15 @@ public class VoomBridge extends BusModBase {
     private Connection conn;
     private Map<Long, Channel> consumerChannels = new HashMap<>();
     private Map<String, Channel> replyChannels = new HashMap<>();
+    private Map<String, Message<VoomMessage<com.google.protobuf.Message>>> rpcMessageMap = new HashMap<>();
+    
     private long consumerSeq;
     private Queue<Channel> availableChannels = new LinkedList<>();
     private String defaultContentType;
     
     private MessageCodec<com.google.protobuf.Message> codec;
+    
+    private String defaultReplyAddr;
     
     // {{{ start
     /** {@inheritDoc} */
@@ -82,7 +86,6 @@ public class VoomBridge extends BusModBase {
         ProtobufLoader loader = new ProtobufLoader("com.livefyre.");
         codec = new MimeProtobufMessageCodec(new MimeProtobufBinaryCodec(loader));
 
-        
         // register handlers
         eb.registerHandler(address + ".create-consumer", new Handler<Message<JsonObject>>() {
             public void handle(final Message<JsonObject> message) {
@@ -106,48 +109,30 @@ public class VoomBridge extends BusModBase {
     // }}}
     
     public void handleReconnect() throws IOException {
-    //    consumerChannels.clear();
-        //replyChannels.clear();
-        
-        for (Entry<String, Channel> entry:replyChannels.entrySet()) {
-            entry.getValue().queueDeclare(entry.getKey(), false, true, true, null);
-        }
         eb.publish("voom.reconnect", new JsonObject());
     }
 
-    public void ensureReplyChannel(final String queueName) throws IOException {
-        if (replyChannels.containsKey(queueName)) {
-            return;
+    public String ensureReplyChannel(String queueName) throws IOException {
+        if (queueName != null && replyChannels.containsKey(queueName)) {
+            return queueName;
         }
+        
         Channel channel = getChannel();
-        AMQPMessageConsumer<com.google.protobuf.Message> cons = new AMQPMessageConsumer<com.google.protobuf.Message>(channel, codec) {
-            @Override
-            public void handleDelivery(String consumerTag, Envelope envelope,
-                    BasicProperties properties, VoomMessage<com.google.protobuf.Message> msg) {
-                VoomHeaders headers = msg.getHeaders();
-                logger.info(String.format("Received response of type %s, replyTo=%s, correlationId=%s",
-                        headers.contentType(), 
-                        headers.replyTo(), 
-                        headers.correlationId()));
-                
-                eb.send(queueName, msg);
-                try {
-                    getChannel().basicAck(envelope.getDeliveryTag(), false);
-                } catch (IOException e) {
-                    // TODO Auto-generated catch block
-                    e.printStackTrace();
-                }                    
-            }
-        };
-
+        if (queueName == null) {
+            queueName = channel.queueDeclare().getQueue();
+        } else {
+            channel.queueDeclare(queueName, false, true, true, null);
+        }
+        
+        ReplyConsumer cons = new ReplyConsumer(channel, codec, queueName);
+        
         logger.info(String.format("Registering reply queue, name=%s", queueName));
-        channel.queueDeclare(queueName, false, true, true, null);
-        logger.info(String.format("Declared queue"));
+        
         channel.basicConsume(queueName, cons);
-        logger.info(String.format("basic consume"));
         replyChannels.put(queueName, channel);
+        return queueName;
     }
-    
+
     // {{{ stop
     /** {@inheritDoc} */
     @Override
@@ -175,44 +160,72 @@ public class VoomBridge extends BusModBase {
     // }}}
 
     // {{{ send
-    private void send(final AMQP.BasicProperties _props, final VoomMessage<com.google.protobuf.Message> message)
+    private void send(final AMQP.BasicProperties _props, final Message<VoomMessage<com.google.protobuf.Message>> message)
         throws IOException, MessagingException
     {
-        logger.info("MEEEOW");
+        VoomMessage<com.google.protobuf.Message> voomMsg = message.body;
+        VoomHeaders headers = voomMsg.getHeaders();
+                
+        if (message.replyAddress != null) {
+            // If the user has provided a callback, register it.
+            if (headers.replyTo() == null) {
+                // The user has not passed a replyTo address, create (if necessary) and use the default.
+                if (defaultReplyAddr == null) {
+                    defaultReplyAddr = ensureReplyChannel(null);
+                }
+                message.body.putHeader("reply_to", defaultReplyAddr);
+            }
+            // Set a correlation ID if it hasn't been provided.
+            if (headers.correlationId() == null) {
+                message.body.putHeader("correlation_id", UUID.randomUUID().toString());
+            }
+            // Register the callback
+            rpcMessageMap.put(headers.correlationId(), message);
+        } else if (headers.replyTo() != null) {
+            ensureReplyChannel(headers.replyTo());
+        }        
+
         Channel channel = getChannel();
         availableChannels.add(channel);
-        VoomHeaders headers = message.getHeaders();
         String ctype = headers.contentType().getBaseType();
         logger.debug(String.format("Sending message of type %s, replyTo=%s, correlationId=%s",
-                ctype, headers.replyTo(), headers.correlationId()));
-        if (headers.replyTo() != null) {
-            ensureReplyChannel(headers.replyTo());
-        }
-
+                ctype, headers.replyTo(), headers.correlationId()));        
+        
         (new AMQPMessageSender<com.google.protobuf.Message>(
-                codec)).send(channel, message);
+                codec)).send(channel, voomMsg);
     }
     // }}}
 
     // {{{ createConsumer
     private long createConsumer(final String exchangeName,
+                                final String exchangeType,
                                 final String routingKey,
                                 final String forwardAddress,
                                 final String contentType)
         throws IOException
     {
+        logger.info(String.format("Creating new consumer, exchangeName=%s, exchangeType=%s, routingKey=%s, forwardAddress=%s",
+                exchangeName, exchangeType, routingKey, forwardAddress));
+        
         Channel channel = getChannel();
         AMQPMessageConsumer<com.google.protobuf.Message> cons = new AMQPMessageConsumer<com.google.protobuf.Message>(channel, codec) {
             @Override
             public void handleDelivery(String consumerTag, Envelope envelope,
                     BasicProperties properties, VoomMessage<com.google.protobuf.Message> msg) {
-                eb.send(forwardAddress, msg);                    
+
+                // The message is sent to the forward address, if provided, or the routing key.
+                String forwardAddrOrKey = forwardAddress;
+                if (forwardAddrOrKey == null) {
+                    forwardAddrOrKey = envelope.getRoutingKey();
+                }
+                eb.publish(forwardAddrOrKey, msg);
             }
         };
         
+        channel.exchangeDeclare(exchangeName, exchangeType);
         String queueName = channel.queueDeclare().getQueue();
         channel.queueBind(queueName, exchangeName, routingKey);
-        channel.basicConsume(queueName, cons);        
+        channel.basicConsume(queueName, true, cons);        
         
         long id = consumerSeq++;
         consumerChannels.put(id, channel);
@@ -234,6 +247,7 @@ public class VoomBridge extends BusModBase {
     // {{{ handleCreateConsumer
     private void handleCreateConsumer(final Message<JsonObject> message) {
         String exchange = message.body.getString("exchange", "");
+        String exchangeType = message.body.getString("exchangeType", "");
         String routingKey = message.body.getString("routingKey");
         String forwardAddress = message.body.getString("forward");
         String contentType = message.body.getString("content-type", defaultContentType);
@@ -241,7 +255,7 @@ public class VoomBridge extends BusModBase {
         JsonObject reply = new JsonObject();
 
         try {
-            reply.putNumber("id", createConsumer(exchange, routingKey, forwardAddress, contentType));
+            reply.putNumber("id", createConsumer(exchange, exchangeType, routingKey, forwardAddress, contentType));
 
             //sendOK(message, reply);
         } catch (IOException e) {
@@ -261,7 +275,7 @@ public class VoomBridge extends BusModBase {
     // {{{ handleSend
     private void handleSend(final Message<VoomMessage<com.google.protobuf.Message>> message) {
         try {
-            send(null, message.body);
+            send(null, message);
             // TODO
             // sendOK(message);
         } catch (IOException | MessagingException e) {
@@ -282,4 +296,41 @@ public class VoomBridge extends BusModBase {
             }
         }
     }
+        
+    private class ReplyConsumer extends AMQPMessageConsumer<com.google.protobuf.Message> {
+        // 
+        private String replyTo;
+        
+        public ReplyConsumer(Channel channel,
+                MessageCodec<com.google.protobuf.Message> codec, String replyTo) {
+            super(channel, codec);
+            this.replyTo = replyTo;
+        }
+
+        @Override
+        public void handleDelivery(String consumerTag, Envelope envelope,
+                BasicProperties properties, VoomMessage<com.google.protobuf.Message> msg) {
+            VoomHeaders headers = msg.getHeaders();
+            logger.info(String.format("Received response of type %s, replyTo=%s, correlationId=%s",
+                    headers.contentType(), 
+                    headers.replyTo(), 
+                    headers.correlationId()));
+            
+            // Check if we have a callback for this correlation ID.
+            Message<VoomMessage<com.google.protobuf.Message>> origMsg = rpcMessageMap.get(headers.correlationId());
+            if (origMsg != null) {
+                rpcMessageMap.remove(headers.correlationId());
+                origMsg.reply(msg);
+            }
+            
+            eb.send(replyTo, msg);
+            try {
+                getChannel().basicAck(envelope.getDeliveryTag(), false);
+            } catch (IOException e) {
+                // TODO Auto-generated catch block
+                e.printStackTrace();
+            }                    
+        }
+    };
+
 }
